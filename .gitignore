@@ -20,3 +20,6 @@ coverage/
 !.env.example
 .DS_Store
 Thumbs.db
+
+# 问答索引快照（运行期自动重建的缓存）
+data/qa/

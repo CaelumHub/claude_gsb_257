@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>语料问答 - NLP 流水线平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .ask-box { display: flex; gap: 10px; }
+    .ask-box input { flex: 1; font-size: 15px; padding: 12px 14px; }
+    .examples { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .examples .ex { font-size: 12px; padding: 3px 12px; border-radius: 999px;
+      background: var(--surface-2); border: 1px solid var(--border); cursor: pointer; color: var(--text-muted); }
+    .examples .ex:hover { color: var(--primary); border-color: #c7d2fe; }
+    .answer-head { font-size: 20px; font-weight: 700; line-height: 1.6;
+      background: var(--primary-soft); border: 1px solid #c7d2fe; border-radius: 10px; padding: 16px 18px; }
+    .answer-head.notfound { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+    .group { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+    .group.conflict { border-color: #fde68a; background: #fffdf5; }
+    .group .ga { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+    .src { border-left: 3px solid var(--primary); background: var(--surface-2);
+      border-radius: 0 8px 8px 0; padding: 10px 14px; margin: 8px 0; }
+    .src .meta { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+    .src .meta code { font-family: var(--mono); }
+    .src .sent { line-height: 1.8; }
+    .src .ans-hl { background: #fef08a; border-radius: 3px; padding: 0 2px; }
+    .src .ctx { color: var(--text-muted); font-size: 13px; }
+    .stat-row { display: flex; gap: 18px; font-size: 13px; color: var(--text-muted); flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">语料问答</h1>
+    <p class="page-desc">直接用自然语言提问：跨全部分片检索最相关的句子，抽取答案并附原文出处；语料中没有答案时明确告知，不编造。</p>
+
+    <section class="card">
+      <label>提出问题</label>
+      <div class="ask-box">
+        <input type="text" id="question" placeholder="例如：什么是自然语言处理？ / 谁在什么时候做了什么？"
+               onkeydown="if(event.key==='Enter')doAsk()">
+        <button class="btn" id="btn-ask">提问</button>
+      </div>
+      <div class="examples" id="examples"></div>
+      <div class="stat-row mt" id="index-stats"></div>
+    </section>
+
+    <section class="card" id="result-card" style="display:none">
+      <h2>回答</h2>
+      <div id="result"></div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("qa.html");
+
+const EXAMPLES = [
+  "什么是自然语言处理？",
+  "深度学习在哪个领域表现出色？",
+  "这个产品怎么样？",
+  "谁在什么时候做了什么？",
+];
+
+$("#examples").innerHTML = EXAMPLES.map(q =>
+  `<span class="ex">${esc(q)}</span>`).join("");
+$$("#examples .ex").forEach(el =>
+  el.addEventListener("click", () => { $("#question").value = el.textContent; doAsk(); }));
+
+async function refreshStats() {
+  try {
+    const r = await api("/api/qa/stats");
+    const s = r.index;
+    $("#index-stats").innerHTML =
+      `已索引 <b>${s.documents}</b> 篇文档 · <b>${s.passages}</b> 个句子 · <b>${s.terms}</b> 个检索词项（新增文档后自动增量更新）`;
+  } catch (_) { /* ignore */ }
+}
+
+function highlight(sentence, start, end) {
+  if (start == null || start < 0 || end == null || end <= start || end > sentence.length)
+    return esc(sentence);
+  return esc(sentence.slice(0, start)) +
+    `<span class="ans-hl">${esc(sentence.slice(start, end))}</span>` +
+    esc(sentence.slice(end));
+}
+
+function sourceHtml(s) {
+  const ctxBefore = (s.context || []).filter(c => c.sent_index < s.sent_index)
+    .map(c => `<div class="ctx">${esc(c.text)}</div>`).join("");
+  const ctxAfter = (s.context || []).filter(c => c.sent_index > s.sent_index)
+    .map(c => `<div class="ctx">${esc(c.text)}</div>`).join("");
+  // 事件类问题答案是整句时，只聚焦高亮关键实体（人名/时间）
+  const hs = (s.focus_start != null && s.focus_start >= 0) ? s.focus_start : s.answer_start;
+  const he = (s.focus_end != null && s.focus_end >= 0) ? s.focus_end : s.answer_end;
+  return `
+    <div class="src">
+      <div class="meta">
+        📄 文档：<b>${esc(s.doc_name)}</b>（<code>${esc(s.doc_id)}</code>） ·
+        第 ${s.sent_index + 1} 句 · 字符位置 <code>${s.char_start}–${s.char_end}</code> ·
+        相关度 ${s.score}
+      </div>
+      ${ctxBefore}
+      <div class="sent">${highlight(s.sentence, hs, he)}</div>
+      ${ctxAfter}
+    </div>`;
+}
+
+async function doAsk() {
+  const question = $("#question").value.trim();
+  if (!question) return toast("请输入问题", "err");
+  const btn = $("#btn-ask");
+  setLoading(btn, true, "检索中…");
+  try {
+    const r = await api("/api/qa/ask", { method: "POST", body: { question } });
+    $("#result-card").style.display = "";
+    if (!r.found) {
+      $("#result").innerHTML = `
+        <div class="answer-head notfound">🙅 ${esc(r.reason)}</div>
+        ${r.candidates && r.candidates.length ? `
+          <h3 style="margin-top:14px">最相关但不足以作答的段落（供核对）</h3>
+          ${r.candidates.map(c => `
+            <div class="src">
+              <div class="meta">📄 ${esc(c.doc_name)}（<code>${esc(c.doc_id)}</code>） · 第 ${c.sent_index + 1} 句 · 相关度 ${c.score} · 覆盖率 ${c.coverage}</div>
+              <div class="sent">${esc(c.sentence)}</div>
+            </div>`).join("")}` : ""}`;
+    } else {
+      const badge = r.conflict
+        ? '<span class="badge amber">不同文档存在不同说法</span>'
+        : (r.answers[0].doc_count > 1
+            ? '<span class="badge green">多篇文档相互印证</span>'
+            : '<span class="badge blue">单一出处</span>');
+      $("#result").innerHTML = `
+        <div class="answer-head">${esc(r.answer)}</div>
+        <div class="mt">${badge}
+          <span class="muted" style="margin-left:8px">${esc(r.reason)}</span></div>
+        ${r.answers.map((g, i) => `
+          <div class="group ${r.conflict ? "conflict" : ""}">
+            <div class="ga">${r.answer_count > 1 ? `说法 ${i + 1}：` : ""}${esc(g.answer)}
+              <span class="badge blue">${g.doc_count} 篇文档 · ${g.support} 条出处</span>
+            </div>
+            ${g.sources.map(sourceHtml).join("")}
+          </div>`).join("")}`;
+    }
+    refreshStats();
+  } catch (e) { toast(e.message, "err"); }
+  setLoading(btn, false);
+}
+
+$("#btn-ask").addEventListener("click", doAsk);
+refreshStats();
+</script>
+</body>
+</html>

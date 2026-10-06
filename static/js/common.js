@@ -13,6 +13,7 @@ const PAGES = [
   { file: "keywords.html",  name: "关键词提取",   desc: "TF-IDF + TextRank" },
   { file: "embedding.html", name: "词向量可视化", desc: "降维投影" },
   { file: "pipeline.html",  name: "流水线配置",   desc: "编排与执行" },
+  { file: "qa.html",        name: "语料问答",     desc: "检索 + 出处溯源" },
 ];
 
 const PAGE_NAMES = {
@@ -20,6 +21,7 @@ const PAGE_NAMES = {
   ner: "命名实体识别", sentiment: "情感分析", summary: "文本摘要",
   translate: "机器翻译", keywords: "关键词提取", embedding: "词向量可视化",
   pipeline: "流水线配置与执行",
+  qa: "语料问答",
 };
 
 // 中文标签集（与后端 /api/meta 一致，离线可用）

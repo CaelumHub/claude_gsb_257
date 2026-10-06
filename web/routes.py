@@ -575,7 +575,7 @@ def list_result_tasks():
     registry = _registry()
     tasks = []
     for name in registry.tasks():
-        if name in ("corpus", "pipeline_config", "annotation"):
+        if name in ("corpus", "pipeline_config", "annotation", "qa_history"):
             continue
         stats = registry.task(name).stats()
         tasks.append(stats)
@@ -626,3 +626,56 @@ def merge_results(task: str):
 @api.post("/results/compact_all")
 def compact_all():
     return jsonify({"compacted": _registry().compact_all()})
+
+
+# ---------------------------------------------------------------------------
+# 语料问答（检索 + 抽取，带原文出处）
+# ---------------------------------------------------------------------------
+
+def _qa_engine():
+    from nlp.qa import get_qa_engine
+    return get_qa_engine(_registry(), current_app.config["DATA_ROOT"])
+
+
+@api.post("/qa/ask")
+def qa_ask():
+    data = _payload()
+    question = (data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "问题不能为空"}), 400
+    top_k = data.get("top_k", 8)
+    result = _qa_engine().answer(question, top_k=top_k)
+    # 记录问答历史（含命中与拒答），便于审计
+    record = {
+        "question": question,
+        "found": result.get("found", False),
+        "answer": result.get("answer"),
+        "conflict": result.get("conflict", False),
+        "answer_count": result.get("answer_count", 0),
+        "reason": result.get("reason", ""),
+        "sources": [s for g in result.get("answers", [])
+                    for s in g.get("sources", [])],
+        "created_at": time.time(),
+    }
+    rid = _registry().task("qa_history").insert(record)
+    result["id"] = rid
+    return jsonify(result)
+
+
+@api.get("/qa/stats")
+def qa_stats():
+    engine = _qa_engine()
+    return jsonify({"index": engine.index_stats()})
+
+
+@api.post("/qa/reindex")
+def qa_reindex():
+    return jsonify({"ok": True, "index": _qa_engine().reindex()})
+
+
+@api.get("/qa/history")
+def qa_history():
+    limit = request.args.get("limit", default=50, type=int)
+    records = _registry().task("qa_history").query(
+        order_by="created_at", order="desc", limit=limit)
+    return jsonify({"history": records, "count": len(records)})
