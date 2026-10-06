@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能问答 - NLP 流水线平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .qa-input { display: flex; gap: 10px; }
+    .qa-input input { flex: 1; font-size: 16px; padding: 12px 14px; }
+    .answer-box { border-radius: 10px; padding: 18px 20px; margin: 10px 0; border: 1px solid var(--border); background: #fff; }
+    .answer-box.found { background: var(--primary-soft); border-color: #c7d2fe; }
+    .answer-box.notfound { background: #fff7ed; border-color: #fed7aa; }
+    .answer-main { font-size: 20px; font-weight: 600; line-height: 1.6; }
+    .answer-meta { color: var(--text-muted); font-size: 13px; margin-top: 6px; }
+    .group { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 10px 0; }
+    .group.conflict { border-color: #fb923c; background: #fff7ed; }
+    .group .g-answer { font-size: 16px; font-weight: 600; }
+    .src { margin-top: 8px; padding: 10px 12px; background: rgba(255,255,255,.7); border-radius: 8px; font-size: 14px; line-height: 1.75; }
+    .src .loc { font-family: var(--mono); font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 2px; }
+    .src .docname { color: var(--primary); font-weight: 600; }
+    .evd { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin: 8px 0; font-size: 14px; line-height: 1.8; }
+    .evd .loc { font-family: var(--mono); font-size: 12px; color: var(--text-muted); display: block; }
+    .evd mark { background: #fef08a; padding: 0 2px; border-radius: 3px; }
+    .examples { margin-top: 10px; }
+    .examples .chip { display: inline-block; margin: 0 6px 6px 0; padding: 4px 12px; border: 1px solid var(--border); border-radius: 999px; font-size: 13px; cursor: pointer; background: #fff; }
+    .examples .chip:hover { border-color: var(--primary); color: var(--primary); }
+    .idx-status { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">智能问答</h1>
+    <p class="page-desc">跨全部分片检索语料，抽取事实性答案并给出原文出处；语料中没有答案时明确说明，不做编造。</p>
+
+    <section class="card">
+      <label>用自然语言提问</label>
+      <div class="qa-input">
+        <input id="question" placeholder="例如：自然语言处理的定义是什么？" autocomplete="off">
+        <button class="btn" id="btn-ask">提问</button>
+        <button class="btn secondary" id="btn-reindex" title="新增文档后通常无需手动重建，提问时会自动同步">重建索引</button>
+      </div>
+      <div class="examples">
+        <span class="chip">自然语言处理的定义是什么？</span>
+        <span class="chip">什么技术推动了人工智能的发展？</span>
+        <span class="chip">深度学习模型在哪个领域表现出色？</span>
+        <span class="chip">自然语言处理是人工智能的分支吗？</span>
+        <span class="chip">明天会下雨吗？</span>
+      </div>
+      <div class="idx-status" id="idx-status">索引状态：加载中…</div>
+    </section>
+
+    <section id="result" hidden>
+      <div class="card">
+        <h2>回答</h2>
+        <div id="answer-box"></div>
+      </div>
+
+      <div class="card" id="groups-card" hidden>
+        <h2 id="groups-title">答案与出处</h2>
+        <div id="groups"></div>
+      </div>
+
+      <div class="card">
+        <h2>相关原文段落（供核实）</h2>
+        <div id="evidence" class="muted">无。</div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("qa.html");
+
+const TYPE_NAMES = {
+  person: "人物", time: "时间", location: "地点", organization: "机构",
+  number: "数量", definition: "定义", fact: "事实",
+};
+
+function locText(s) {
+  return `《${s.doc_name}》 · ${s.shard_file} · 第 ${s.sent_index + 1} 句 · 字符 [${s.start}, ${s.end})`;
+}
+
+function highlight(text, terms) {
+  let out = esc(text);
+  (terms || []).forEach(t => {
+    out = out.replace(new RegExp(esc(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+      m => `<mark>${m}</mark>`);
+  });
+  return out;
+}
+
+async function refreshStatus() {
+  try {
+    const r = await api("/api/qa/status");
+    const i = r.index;
+    const at = i.indexed_at ? "，快照更新于 " + fmtTime(i.indexed_at) : "";
+    $("#idx-status").textContent =
+      `索引状态：已覆盖 ${i.documents} 篇文档 / ${i.passages} 个句子（跨全部分片）${at}`;
+  } catch (e) {
+    $("#idx-status").textContent = "索引状态：不可用（" + e.message + "）";
+  }
+}
+
+function renderAnswer(r) {
+  const box = $("#answer-box");
+  if (r.found) {
+    const tag = r.conflict
+      ? '<span class="badge amber">答案存在分歧</span>'
+      : '<span class="badge green">语料中有据可查</span>';
+    box.className = "answer-box found";
+    box.innerHTML = `
+      ${tag}
+      <div class="answer-main">${esc(r.answer)}</div>
+      <div class="answer-meta">问题类型：${TYPE_NAMES[r.type] || r.type}；
+        共找到 ${r.groups.length} 种答案、${r.groups.reduce((n, g) => n + g.sources.length, 0)} 处出处。
+        ${r.message ? " " + esc(r.message) : ""}</div>`;
+  } else {
+    box.className = "answer-box notfound";
+    box.innerHTML = `
+      <span class="badge">未找到确定答案</span>
+      <div class="answer-main" style="font-size:16px">${esc(r.message || "语料中没有答案。")}</div>
+      <div class="answer-meta">问题类型：${TYPE_NAMES[r.type] || r.type}</div>`;
+  }
+}
+
+function renderGroups(r) {
+  const card = $("#groups-card");
+  if (!r.found) { card.hidden = true; return; }
+  card.hidden = false;
+  $("#groups-title").textContent =
+    r.conflict ? "答案存在分歧（按答案分组，分别给出可核实来源）" : "答案与出处";
+  $("#groups").innerHTML = r.groups.map((g, gi) => `
+    <div class="group ${r.conflict ? "conflict" : ""}">
+      <div class="g-answer">
+        ${r.conflict ? `<span class="badge amber">答案 ${gi + 1}</span> ` : ""}
+        ${esc(g.answer)}
+        <span style="font-weight:400;color:var(--text-muted);font-size:13px">
+          （${g.sources.length} 处印证）
+        </span>
+      </div>
+      ${g.sources.map(s => `
+        <div class="src">
+          <span class="loc">${locText(s)}</span>
+          <span class="docname"></span>${esc(s.sentence)}
+        </div>`).join("")}
+    </div>`).join("");
+}
+
+function renderEvidence(r) {
+  if (!r.evidence.length) {
+    $("#evidence").innerHTML = '<span class="muted">没有检索到相关段落。</span>';
+    return;
+  }
+  $("#evidence").innerHTML = r.evidence.map(e => `
+    <div class="evd">
+      <span class="loc">${locText(e)} ｜ 相关度 ${e.score} ｜ 命中：${(e.matched_terms || []).map(esc).join("、") || "—"}</span>
+      ${highlight(e.text, e.matched_terms)}
+    </div>`).join("");
+}
+
+async function ask() {
+  const question = $("#question").value.trim();
+  if (!question) return toast("请输入问题", "err");
+  const btn = $("#btn-ask");
+  setLoading(btn, true, "检索中…");
+  try {
+    const r = await api("/api/qa/ask", { method: "POST", body: { question } });
+    $("#result").hidden = false;
+    renderAnswer(r);
+    renderGroups(r);
+    renderEvidence(r);
+    refreshStatus();
+  } catch (e) { toast(e.message, "err"); }
+  setLoading(btn, false);
+}
+
+$("#btn-ask").addEventListener("click", ask);
+$("#question").addEventListener("keydown", e => { if (e.key === "Enter") ask(); });
+$(".examples").addEventListener("click", e => {
+  if (e.target.classList.contains("chip")) {
+    $("#question").value = e.target.textContent;
+    ask();
+  }
+});
+$("#btn-reindex").addEventListener("click", async () => {
+  const btn = $("#btn-reindex");
+  setLoading(btn, true, "重建中…");
+  try {
+    await api("/api/qa/reindex", { method: "POST", body: {} });
+    toast("索引已重建");
+    refreshStatus();
+  } catch (e) { toast(e.message, "err"); }
+  setLoading(btn, false);
+});
+
+refreshStatus();
+</script>
+</body>
+</html>

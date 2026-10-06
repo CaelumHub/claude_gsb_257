@@ -37,6 +37,10 @@ def _engine():
     return current_app.config["PIPELINE_ENGINE"]
 
 
+def _qa():
+    return current_app.config["QA_ENGINE"]
+
+
 def _models_dir() -> str:
     import os
     path = os.path.join(current_app.config["DATA_ROOT"], "models")
@@ -193,6 +197,45 @@ def clean_corpus(cid: str):
     result = _clean(record.get("text", ""), data.get("remove_stopwords", True))
     _store_result("clean", record.get("text", ""), result, corpus_id=cid)
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# 智能问答（检索式 QA：跨分片检索 + 抽取式答案 + 出处核实）
+# ---------------------------------------------------------------------------
+
+@api.post("/qa/ask")
+def qa_ask():
+    data = _payload()
+    question = (data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "问题不能为空"}), 400
+    result = _qa().ask(
+        question,
+        top_k=int(data.get("top_k", 8)),
+        min_score=float(data.get("min_score", 1.5)))
+    # 留档，便于在「结果查询」中追溯问过什么
+    record = {
+        "question": question,
+        "found": result["found"],
+        "answer": result["answer"],
+        "conflict": result["conflict"],
+        "type": result["type"],
+        "created_at": time.time(),
+    }
+    _registry().task("qa").insert(record)
+    return jsonify(result)
+
+
+@api.get("/qa/status")
+def qa_status():
+    """索引状态：已索引文档数 / 句子数（自动增量同步后返回）。"""
+    return jsonify({"ok": True, "index": _qa().stats()})
+
+
+@api.post("/qa/reindex")
+def qa_reindex():
+    """强制重建索引（一般无需手动调用，提问时会自动增量同步）。"""
+    return jsonify({"ok": True, "index": _qa().reindex(force=True)})
 
 
 # ---------------------------------------------------------------------------

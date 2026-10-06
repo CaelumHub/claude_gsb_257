@@ -195,6 +195,30 @@ class ShardedStore:
             for record in self._read_shard(index):
                 yield record
 
+    def iter_with_location(self) -> Iterator[tuple[dict, int, int]]:
+        """遍历全部记录，附带其物理位置 ``(record, shard_index, position)``。
+
+        供需要「出处定位」的上层（如问答索引）使用：引用答案时可精确到
+        某个分片文件中的第几条记录。
+        """
+        with FileLock(lock_path_for(self.meta_path), mode="shared"):
+            meta = self._read_meta()
+            for index in range(meta.get("shard_count", 0)):
+                for position, record in enumerate(self._read_shard(index)):
+                    yield record, index, position
+
+    def locate(self, record_id: str) -> Optional[dict]:
+        """返回某条记录所在的分片文件与片内位置，找不到返回 ``None``。"""
+        for record, index, position in self.iter_with_location():
+            if record.get("id") == record_id and not record.get("_deleted"):
+                return {
+                    "id": record_id,
+                    "shard_index": index,
+                    "shard_file": os.path.basename(self._shard_path(index)),
+                    "position": position,
+                }
+        return None
+
     def all(self) -> list[dict]:
         """返回所有记录（按分片顺序）。"""
         with FileLock(lock_path_for(self.meta_path), mode="shared"):

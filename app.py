@@ -21,6 +21,7 @@ if BASE_DIR not in sys.path:
 
 from pipeline import PipelineEngine          # noqa: E402
 from storage import StoreRegistry             # noqa: E402
+from nlp import CorpusRetriever, QAEngine      # noqa: E402
 from web import api                           # noqa: E402
 
 
@@ -34,9 +35,15 @@ def create_app(data_root: str | None = None) -> Flask:
     # 应用级单例，供蓝图通过 current_app.config 访问
     registry = StoreRegistry(data_root, shard_size=100)
     engine = PipelineEngine().register_builtin()
+
+    # 问答引擎：对 corpus 任务的全部分片建句子级 BM25 索引（跨分片、增量同步）
+    index_path = os.path.join(data_root, "models", "qa_index.json")
+    qa_engine = QAEngine(CorpusRetriever(registry.task("corpus"), index_path))
+
     app.config["DATA_ROOT"] = data_root
     app.config["STORE_REGISTRY"] = registry
     app.config["PIPELINE_ENGINE"] = engine
+    app.config["QA_ENGINE"] = qa_engine
     app.config["JSON_AS_ASCII"] = False
 
     app.register_blueprint(api)
